@@ -5,7 +5,10 @@ extern crate quoted_printable;
 use std::collections::BTreeMap;
 use std::error;
 use std::fmt;
+use std::fs;
+use std::io::{self, Read};
 use std::ops::Deref;
+use std::path::Path;
 
 use charset::decode_latin1;
 use charset::Charset;
@@ -393,6 +396,19 @@ pub trait MailHeaderMap {
     ///         vec!["Value1".to_string(), "Value2".to_string()]);
     /// ```
     fn get_all_values(&self, key: &str) -> Result<Vec<String>, MailParseError>;
+
+    fn received(&mut self) -> Result<i64, MailParseError> {
+        let received = self.get_first_value("Received")?;
+        match received {
+            Some(v) => v
+                .rsplit(';')
+                .nth(0)
+                .ok_or_else(|| "Unable to split Received header")
+                .and_then(|ts| dateparse(ts))
+                .map_err(MailParseError::Generic),
+            None => Err(MailParseError::Generic("No Received header found"))?,
+        }
+    }
 }
 
 impl<'a> MailHeaderMap for [MailHeader<'a>] {
@@ -614,6 +630,47 @@ pub fn parse_content_disposition(header: &str) -> ParsedContentDisposition {
     ParsedContentDisposition {
         disposition,
         params: params.params,
+    }
+}
+
+/// Container for data that is expected to contain an unparsed message.
+#[derive(Debug)]
+pub struct MailData(Vec<u8>);
+
+impl MailData {
+    /// Reads mail data from the file system.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    ///     use mailparse::MailData;
+    ///     let data = MailData::read_from("message.rfc822");
+    ///     let parsed = data.parsed();
+    /// ```
+    pub fn read_from<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        let mut file = fs::File::open(path)?;
+        let mut data = Vec::<u8>::new();
+        file.read_to_end(&mut data)?;
+        Ok(MailData(data))
+    }
+
+    /// Parses the data into a message.
+    ///
+    /// See the [`parse_mail`] function for details.
+    pub fn parsed(&self) -> Result<ParsedMail, MailParseError> {
+        parse_mail(&self.0)
+    }
+
+    /// Parses only the message headers.
+    ///
+    /// Returns the parsed mail headers and the remaining data, which is
+    /// expected to contain the message body.
+    ///
+    /// This works almost the same as [`parse_headers`], besides returning a
+    /// slice of the data following the headers, instead of a position.
+    pub fn headers(&self) -> Result<(Vec<MailHeader>, &[u8]), MailParseError> {
+        let (headers, body_start) = parse_headers(&self.0)?;
+        Ok((headers, &self.0[body_start..]))
     }
 }
 
